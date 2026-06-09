@@ -5,6 +5,9 @@
 //  Created by Jonas Hafner on 09.06.26.
 //
 
+import Foundation
+import CoreLocation
+import SwiftUI
 
 struct ColoredSegment: Identifiable {
     let id = UUID()

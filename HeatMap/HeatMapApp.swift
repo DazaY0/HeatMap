@@ -11,7 +11,7 @@ import SwiftUI
 struct HeatMapApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            CentralMapView()
         }
     }
 }

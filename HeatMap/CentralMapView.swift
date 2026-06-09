@@ -1,61 +1,144 @@
+//
+//  CentralMapView.swift
+//  HeatMap
+//
+//  Created by Jonas Hafner on 09.06.26.
+//
 import SwiftUI
 import MapKit
+import UniformTypeIdentifiers
 
 struct CentralMapView: View {
     @StateObject private var manager = HeatmapManager()
-    @State private var selectedRegionName: String? = "Vienna"
+    @State private var sidebarSelection: SidebarItem? = nil
+    @State private var isImportingFiles = false
+    
+    // Unified selection state to identify what row is currently focused
+    enum SidebarItem: Hashable {
+        case region(String)
+        case activity(UUID, regionName: String)
+    }
     
     var body: some View {
         NavigationSplitView {
-            // Include predefined regions plus "Other" if it contains activities
             let availableKeys = Array(manager.sortedActivities.keys).sorted()
             
-            List(availableKeys, id: \.self, selection: $selectedRegionName) { regionName in
-                NavigationLink(value: regionName) {
-                    HStack {
-                        Image(systemName: "mappin.and.ellipse")
-                        Text(regionName)
-                        Spacer()
-                        Text("\(manager.sortedActivities[regionName]?.count ?? 0)")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+            List(selection: $sidebarSelection) {
+                ForEach(availableKeys, id: \.self) { regionName in
+                    DisclosureGroup {
+                        // Internal Expanded Activities
+                        ForEach(manager.sortedActivities[regionName] ?? []) { activity in
+                            HStack {
+                                Image(systemName: "waveform.path")
+                                Text(activity.name)
+                            }
+                            .tag(SidebarItem.activity(activity.id, regionName: regionName))
+                            // Right-click action to delete item
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    // Check if this is the last activity remaining in this specific region
+                                    let isLastActivity = (manager.sortedActivities[regionName]?.count ?? 0) <= 1
+                                    
+                                    if isLastActivity {
+                                        // Clear selection entirely since the region and activity will both disappear
+                                        sidebarSelection = nil
+                                    } else if case .activity(let id, _) = sidebarSelection, id == activity.id {
+                                        // Fallback to parent region header if only this activity is being targeted
+                                        sidebarSelection = .region(regionName)
+                                    }
+                                    
+                                    manager.deleteActivity(activity, from: regionName)
+                                } label: {
+                                    Label("Delete Activity", systemImage: "trash")
+                                }
+                            }
+                        }
+                    } label: {
+                        // Top-level Region Header Row
+                        HStack {
+                            Image(systemName: "mappin.and.ellipse")
+                            Text(regionName)
+                            Spacer()
+                            Text("\(manager.sortedActivities[regionName]?.count ?? 0)")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        .tag(SidebarItem.region(regionName))
                     }
                 }
             }
             .navigationTitle("Locations")
         } detail: {
-            if let selectedRegionName, let activities = manager.sortedActivities[selectedRegionName] {
-                Map {
-                    ForEach(activities) { activity in
-                        MapPolyline(coordinates: activity.coordinates)
-                            .stroke(Color.orange.opacity(0.1), lineWidth: 3)
+            // Dynamically evaluate map display parameters based on current row item selection
+            if let sidebarSelection {
+                switch sidebarSelection {
+                case .region(let regionName):
+                    if let activities = manager.sortedActivities[regionName] {
+                        renderMap(for: activities, title: regionName)
+                    } else {
+                        noActivitiesView
+                    }
+                case .activity(let activityID, let regionName):
+                    if let activities = manager.sortedActivities[regionName],
+                       let activity = activities.first(where: { $0.id == activityID }) {
+                        renderMap(for: [activity], title: activity.name)
+                    } else {
+                        noActivitiesView
                     }
                 }
-                .mapStyle(.standard(darkWithLabels: true))
-                .navigationTitle("\(selectedRegionName) Map")
             } else {
-                ContentUnavailableView("No Activities Tracked", systemImage: "map.dash")
+                noActivitiesView
             }
         }
-        .onAppear {
-            // Mock data insertion for testing logic on launch
-            loadSampleData()
+        .toolbar {
+            ToolbarItem {
+                Button(action: { isImportingFiles = true }) {
+                    Label("Import GPX", systemImage: "plus.app")
+                }
+            }
+        }
+        .fileImporter(
+            isPresented: $isImportingFiles,
+            allowedContentTypes: [UTType(filenameExtension: "gpx")].compactMap { $0 },
+            allowsMultipleSelection: true
+        ) { result in
+            switch result {
+            case .success(let urls):
+                for url in urls {
+                    manager.importGPXFile(from: url)
+                }
+            case .failure(let error):
+                print("Error selecting file: \(error.localizedDescription)")
+            }
+        }
+        .sheet(item: $manager.unresolvedActivity) { activity in
+            RegionPromptSheet(activity: activity, manager: manager)
         }
     }
     
-    private func loadSampleData() {
-        // Example track in Vienna
-        let viennaTrack = [
-            CLLocationCoordinate2D(latitude: 48.2100, longitude: 16.3700),
-            CLLocationCoordinate2D(latitude: 48.2200, longitude: 16.3800)
-        ]
-        // Example track in South Tyrol (Brixen area)
-        let southTyrolTrack = [
-            CLLocationCoordinate2D(latitude: 46.7100, longitude: 11.6500),
-            CLLocationCoordinate2D(latitude: 46.7200, longitude: 11.6600)
-        ]
-        
-        manager.processNewActivity(Activity(name: "Morning Run Vienna", coordinates: viennaTrack))
-        manager.processNewActivity(Activity(name: "Alps Trail Ride", coordinates: southTyrolTrack))
+    // MARK: - Extracted Map Elements
+    
+    @ViewBuilder
+    private func renderMap(for activities: [Activity], title: String) -> some View {
+        Map {
+            ForEach(activities) { activity in
+                let chunks = activity.generateColoredSegments(
+                    globalFrequency: manager.globalFrequency,
+                    maxFrequency: manager.maxFrequency
+                )
+                
+                ForEach(chunks) { chunk in
+                    MapPolyline(coordinates: chunk.coordinates)
+                        .stroke(chunk.color, lineWidth: 5)
+                }
+            }
+        }
+        .mapStyle(.standard)
+        .environment(\.colorScheme, .dark)
+        .navigationTitle("\(title) Map")
+    }
+    
+    private var noActivitiesView: some View {
+        ContentUnavailableView("No Activities Tracked", systemImage: "map.dash")
     }
 }
